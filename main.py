@@ -4,6 +4,7 @@
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 import config
 from physics import MarketPhysics
 from market import OrderBook
@@ -139,6 +140,36 @@ def run_active_simulation():
     print(f"Final Equity:   ${end_eq:,.2f}")
     print(f"Total Return:   {ret:.2f}%")
     print(f"Saved detailed logs to 'my_performance.csv'")
+    
+    # --- VISUALIZATION BLOCK (NEW) ---
+    print("--- Generating Performance Plot ---")
+    
+    # Create a figure with a secondary y-axis
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+    
+    # Plot Strategy Equity (Left Axis)
+    color = 'tab:blue'
+    ax1.set_xlabel('Simulation Step')
+    ax1.set_ylabel('Strategy Equity ($)', color=color)
+    ax1.plot(df_res['Step'], df_res['Equity'], color=color, label='My Algo Equity')
+    ax1.tick_params(axis='y', labelcolor=color)
+    ax1.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+    # Plot Market Price (Right Axis)
+    ax2 = ax1.twinx()  
+    color = 'tab:gray'
+    ax2.set_ylabel('Asset Price ($)', color=color)  
+    ax2.plot(df_res['Step'], df_res['Price'], color=color, alpha=0.6, linestyle='-', label='Market Price')
+    ax2.tick_params(axis='y', labelcolor=color)
+
+    # Title and Layout
+    plt.title(f'Strategy Performance vs Market ({config.TIMEFRAME})')
+    fig.tight_layout()  
+    
+    # Save and Show
+    plt.savefig('performance_chart.png')
+    print("Saved plot to 'performance_chart.png'")
+    plt.show()
 
 if __name__ == "__main__":
     run_active_simulation()
