@@ -1,4 +1,7 @@
-# main.py, the main simulation loop, initializes physics, assets, agents, runs the daily loop, collects data, and exports to CSV
+# main.py
+# ACTIVE MODE: Runs the simulation WITH your strategy injected.
+# Use this to test Execution, Slippage, and PnL.
+
 import numpy as np
 import pandas as pd
 import config
@@ -6,113 +9,136 @@ from physics import MarketPhysics
 from market import OrderBook
 from agents import Agent
 
-def run_simulation():
-    print(f"--- Initializing {config.N_ASSETS} Assets over {config.N_DAYS} Days ---")
+# IMPORT YOUR STRATEGY
+from my_strategy import UserStrategy
+
+def run_active_simulation():
+    print(f"--- INITIALIZING ACTIVE SIMULATION ---")
+    print(f"Timeframe: {config.TIMEFRAME} | Total Steps: {config.N_STEPS}")
+    print(f"Trading: Asset STK_000 ONLY")
     
-    # 1. Init Physics & Volatility
+    # 1. Init Physics
     physics = MarketPhysics()
     vol_path = physics.get_volatility_path()
     
-    # 2. Init Assets
+    # 2. Init Assets (We simulate N assets, but you only trade the first one)
     books = [OrderBook() for _ in range(config.N_ASSETS)]
     
-    # 3. Init Agents
+    # 3. Init Market Agents
     agents = []
     for _ in range(config.N_TREND_FOLLOWERS): agents.append(Agent('Trend'))
     for _ in range(config.N_MEAN_REVERTERS): agents.append(Agent('MeanRev'))
     for _ in range(config.N_INSTITUTIONAL): agents.append(Agent('Institutional'))
     for _ in range(config.N_NOISE_TRADERS): agents.append(Agent('Noise'))
     
-    # 4. Storage & State
-    price_history = np.zeros((config.N_DAYS, config.N_ASSETS))
-    for i in range(config.N_ASSETS): price_history[0, i] = config.INITIAL_PRICE
+    # 4. Init YOUR Strategy
+    my_algo = UserStrategy()
+    my_pnl_history = []
     
-    all_data = []
+    # 5. Storage
+    price_history = np.zeros((config.N_STEPS, config.N_ASSETS))
+    for i in range(config.N_ASSETS): 
+        price_history[0, i] = config.INITIAL_PRICE
+        books[i].mid_price = config.INITIAL_PRICE
     
-    # --- BLACK SWAN STATE MACHINE ---
+    # --- SIMULATION LOOP ---
     panic_factor = 0.0
     swans_triggered = 0
     swan_cooldown = 0
     
-    print("--- Starting Simulation Loop ---")
+    print("--- STARTING LIVE TRADING LOOP ---")
     
-    for t in range(1, config.N_DAYS):
-        current_vol = vol_path[t]
+    # We use N_STEPS (calculated in config) instead of N_DAYS
+    for t in range(1, config.N_STEPS):
+        current_vol = vol_path[t] if t < len(vol_path) else vol_path[-1]
         
-        # --- RANDOM BLACK SWAN LOGIC ---
-        # Decay existing panic
+        # --- BLACK SWAN LOGIC ---
         panic_factor *= 0.92
         if swan_cooldown > 0: swan_cooldown -= 1
         
         if config.ENABLE_BLACK_SWANS:
-            # Check conditions: Under limit, cooldown over, random chance hit
             if (swans_triggered < config.MAX_SWANS_PER_YEAR and 
                 swan_cooldown == 0 and 
                 np.random.rand() < config.SWAN_PROBABILITY):
-                
-                print(f"[!] BLACK SWAN EVENT TRIGGERED AT DAY {t}")
+                print(f"[!] BLACK SWAN EVENT at Step {t}")
                 panic_factor = config.SWAN_SEVERITY
                 swans_triggered += 1
                 swan_cooldown = config.SWAN_COOLDOWN
 
-        # Generate daily shocks
+        # Generate Shocks
         shocks = physics.L @ np.random.normal(0, 1, config.N_ASSETS)
         
-        # Loop through assets
+        # --- ASSET LOOP ---
         for i in range(config.N_ASSETS):
             book = books[i]
             
-            # A. Update Order Book (Spreads)
+            # A. Update Book
             book.update_quotes(current_vol, panic_factor)
             
             # B. Physics Drift
-            # If panic, add massive downside drag (-8% per day limit)
             drift = 0.0001
             if panic_factor > 0.1: drift -= (panic_factor * 0.08)
-            
-            fund_return = drift + (current_vol * shocks[i])
+            fund_return = drift + (current_vol * np.sqrt(config.DT) * shocks[i])
             book.mid_price *= np.exp(fund_return)
             
-            # C. Agent Decisions
+            # C. Gather Order Flow
             asset_hist = price_history[:t, i]
             net_flow = 0
-            volume = 0
             
+            # Internal Agents
             for agent in agents:
-                qty = agent.decide(book, asset_hist, current_vol, panic_factor)
+                # Pass 't' so agents know when to wait (Patience)
+                qty = agent.decide(book, asset_hist, current_vol, panic_factor, t)
                 net_flow += qty
-                volume += abs(qty)
             
-            # D. Execution
-            close_price = book.execute(net_flow)
-            price_history[t, i] = close_price
+            # --- D. INJECT YOUR STRATEGY (Asset 0 Only) ---
+            user_trade_size = 0
+            if i == 0:
+                user_trade_size = my_algo.on_data(book, asset_hist, current_vol, t)
+                net_flow += user_trade_size # <--- ACTIVE MARKET IMPACT
             
-            # E. Record Data
-            # Fake High/Low based on volatility
-            daily_range = close_price * current_vol * (1 + panic_factor)
+            # E. Execute
+            exec_price = book.execute(net_flow)
+            price_history[t, i] = exec_price
             
-            all_data.append({
-                'Day': t,
-                'Ticker': f"STK_{i:03d}",
-                'Sector': f"Sector_{i // (config.N_ASSETS//4) + 1}",
-                'Open': price_history[t-1, i],
-                'High': close_price + (daily_range/2),
-                'Low': close_price - (daily_range/2),
-                'Close': close_price,
-                'Volume': int(volume),
-                'Bid': book.bid,
-                'Ask': book.ask,
-                'Spread': book.ask - book.bid,
-                'Panic_Score': panic_factor
-            })
-            
-    # Export
-    print("--- Compiling Data ---")
-    df = pd.DataFrame(all_data)
-    filename = 'phd_market_data.csv'
-    df.to_csv(filename, index=False)
-    print(f"Done! Saved to {filename}")
-    print(f"Total Black Swans Triggered: {swans_triggered}")
+            # F. Mark-to-Market Your Strategy
+            if i == 0:
+                if user_trade_size != 0:
+                    # You pay Ask to buy, receive Bid to sell
+                    fill_price = book.ask if user_trade_size > 0 else book.bid
+                    
+                    # Update Cash & Position
+                    my_algo.position += user_trade_size
+                    my_algo.cash -= (user_trade_size * fill_price)
+                
+                # Calculate Equity (Cash + Unrealized PnL)
+                equity = my_algo.cash + (my_algo.position * exec_price)
+                
+                my_pnl_history.append({
+                    'Step': t,
+                    'Price': exec_price,
+                    'Position': my_algo.position,
+                    'Cash': my_algo.cash,
+                    'Equity': equity,
+                    'Trade_Size': user_trade_size
+                })
+
+    # --- EXPORT RESULTS ---
+    print("--- Simulation Complete ---")
+    
+    # Save Strategy Performance
+    df_res = pd.DataFrame(my_pnl_history)
+    df_res.to_csv('my_performance.csv', index=False)
+    
+    # Print Quick Stats
+    start_eq = 100_000
+    end_eq = df_res.iloc[-1]['Equity']
+    ret = ((end_eq - start_eq) / start_eq) * 100
+    
+    print(f"Initial Equity: ${start_eq:,.2f}")
+    print(f"Final Equity:   ${end_eq:,.2f}")
+    print(f"Total Return:   {ret:.2f}%")
+    print(f"Saved detailed logs to 'my_performance.csv'")
 
 if __name__ == "__main__":
-    run_simulation()
+    run_active_simulation()
