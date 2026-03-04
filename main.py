@@ -52,8 +52,7 @@ def run_active_simulation():
     swan_cooldown = 0
     
     print("--- STARTING LIVE TRADING LOOP ---")
-    
-    # WRAP RANGE WITH TQDM FOR PROGRESS BAR
+
     for t in tqdm(range(1, config.N_STEPS), desc="Simulating Market", unit="step"):
         current_vol = vol_path[t] if t < len(vol_path) else vol_path[-1]
         
